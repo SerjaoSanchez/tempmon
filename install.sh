@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Instala o tempmon em ~/.local/bin (não precisa de sudo).
-#   ./install.sh               instala ou atualiza
-#   ./install.sh --uninstall   remove o programa (mantém configuração e logs)
+# Installs tempmon to ~/.local/bin (no sudo needed).
+#   ./install.sh               install or update
+#   ./install.sh --uninstall   remove the program (keeps config and logs)
 set -euo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/SerjaoSanchez/tempmon/main"
@@ -9,44 +9,44 @@ DEST="$HOME/.local/bin/tempmon"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     rm -f "$DEST"
-    echo "tempmon removido. Configuração mantida em ~/.config/tempmon e logs em ~/tempmon-logs."
+    echo "tempmon removed. Config kept in ~/.config/tempmon and logs in ~/tempmon-logs."
     exit 0
 fi
 
 if ! command -v python3 >/dev/null; then
-    echo "Erro: python3 não encontrado. Instale com: sudo apt install python3" >&2
+    echo "Error: python3 not found. Install it with: sudo apt install python3" >&2
     exit 1
 fi
 if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))'; then
-    echo "Erro: o tempmon precisa de Python 3.8 ou mais novo." >&2
+    echo "Error: tempmon requires Python 3.8 or newer." >&2
     exit 1
 fi
 
 mkdir -p "$(dirname "$DEST")"
 SRC=""
-if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then  # rodando de um arquivo, não via pipe
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then  # running from a file, not through a pipe
     SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tempmon"
 fi
 if [[ -n "$SRC" && -f "$SRC" ]]; then
-    install -m 755 "$SRC" "$DEST"                       # rodando de dentro do repositório clonado
+    install -m 755 "$SRC" "$DEST"                       # running from a cloned repository
 else
-    curl -fsSL "$REPO_RAW/tempmon" -o "$DEST"           # rodando via curl | bash
+    curl -fsSL "$REPO_RAW/tempmon" -o "$DEST"           # running through curl | bash
     chmod 755 "$DEST"
 fi
-echo "tempmon instalado em $DEST"
+echo "tempmon installed to $DEST"
 
 if ! python3 -c 'import tomllib' 2>/dev/null && ! python3 -c 'import tomli' 2>/dev/null; then
     echo
-    echo "Aviso: seu Python é anterior ao 3.11. Para usar o arquivo de configuração, instale:"
+    echo "Note: your Python is older than 3.11. To use the config file, install:"
     echo "    sudo apt install python3-tomli"
 fi
 if ! command -v nvidia-smi >/dev/null && ! ls /sys/class/hwmon/*/name 2>/dev/null | xargs cat 2>/dev/null | grep -q amdgpu; then
     echo
-    echo "Aviso: nenhuma GPU NVIDIA (nvidia-smi) ou AMD (amdgpu) encontrada; o painel da GPU ficará vazio."
+    echo "Note: no NVIDIA (nvidia-smi) or AMD (amdgpu) GPU found; the GPU panel will be empty."
 fi
 case ":$PATH:" in
-    *":$HOME/.local/bin:"*) echo "Pronto! Rode: tempmon" ;;
+    *":$HOME/.local/bin:"*) echo "Done! Run: tempmon" ;;
     *) echo
-       echo "~/.local/bin ainda não está no seu PATH. Saia e entre de novo na sessão,"
-       echo "ou rode por enquanto: ~/.local/bin/tempmon" ;;
+       echo "~/.local/bin is not in your PATH yet. Log out and back in,"
+       echo "or run it for now as: ~/.local/bin/tempmon" ;;
 esac

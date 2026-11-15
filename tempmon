@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""tempmon - monitor de temperatura de CPU, GPU e SSD no terminal.
+"""tempmon - CPU, GPU and SSD temperature monitor for the terminal.
 
-Uso:
-  tempmon                 atualiza a cada 1s (ou o valor do arquivo de configuração)
-  tempmon 2               atualiza a cada 2s
-  tempmon --log           grava a sessão em CSV na pasta definida na configuração
-  tempmon -o jogo.csv     grava a sessão no arquivo indicado
-  tempmon --config        mostra onde fica o arquivo de configuração
-Sair: q ou Ctrl+C
+Usage:
+  tempmon                 refresh every second (or the interval set in the config file)
+  tempmon 2               refresh every 2 seconds
+  tempmon --log           log the session to CSV in the folder set in the config file
+  tempmon -o game.csv     log the session to the given file
+  tempmon --config        print the config file path
+Quit: q or Ctrl+C
 
-CPU: Intel (coretemp) e AMD Ryzen (k10temp / zenpower)
-GPU: NVIDIA (nvidia-smi) e AMD Radeon (amdgpu)
+CPU: Intel (coretemp) and AMD Ryzen (k10temp / zenpower)
+GPU: NVIDIA (nvidia-smi) and AMD Radeon (amdgpu)
 SSD: NVMe
 """
 import argparse, copy, csv, glob, os, re, select, shutil, subprocess, sys, time
@@ -19,60 +19,61 @@ from datetime import datetime
 
 try:                                  # Python 3.11+
     import tomllib
-except ModuleNotFoundError:           # Python 3.8-3.10: pacote python3-tomli
+except ModuleNotFoundError:           # Python 3.8-3.10: python3-tomli package
     try:
         import tomli as tomllib
     except ModuleNotFoundError:
         tomllib = None
 
-VERSION = "1.0.0"
-# ───────────────────────── configuração ─────────────────────────
+VERSION = "1.1.0"
+
+# ───────────────────────── configuration ─────────────────────────
 CONFIG_PATH = os.path.expanduser("~/.config/tempmon/config.toml")
 DEFAULT_CONFIG = """\
-# Configuração do tempmon.
-# Apague este arquivo para restaurar os valores padrão (ele é recriado na próxima execução).
+# tempmon configuration.
+# Delete this file to restore the defaults (it is recreated on the next run).
 
-intervalo = 1.0               # segundos entre atualizações
+interval = 1.0                # seconds between refreshes
 
-[limites]
-# Temperaturas em °C. Abaixo de (alerta - 15) a cor é "normal"; entre (alerta - 15) e alerta, "morno";
-# a partir de "alerta", "quente"; a partir de "critico", "critico".
-cpu_alerta = 70
-cpu_critico = 85
-gpu_alerta = 75
-gpu_critico = 85
-ssd_alerta = 60
-ssd_critico = 70
-# CPUs AMD não informam throttling ao Linux: a partir desta temperatura o tempmon considera
-# que a CPU está no limite térmico. 89 °C é o limite da Ryzen 7 7800X3D.
-cpu_amd_limite = 89
+[thresholds]
+# Temperatures in °C. Below (warn - 15) the color is "normal"; from (warn - 15) to warn, "warm";
+# from "warn" on, "hot"; from "critical" on, "critical".
+cpu_warn = 70
+cpu_critical = 85
+gpu_warn = 75
+gpu_critical = 85
+ssd_warn = 60
+ssd_critical = 70
+# AMD CPUs do not report thermal throttling to Linux: from this temperature on, tempmon
+# considers the CPU to be at its thermal limit. 89 °C is the limit of the Ryzen 7 7800X3D.
+cpu_amd_limit = 89
 
 [log]
-pasta = "~/tempmon-logs"      # onde o tempmon --log salva os arquivos CSV
+dir = "~/tempmon-logs"        # where tempmon --log saves the CSV files
 
-[exibir]
-nucleos = true                # temperatura de cada núcleo / CCD
-ssd = true                    # painel do SSD
+[show]
+cores = true                  # per-core / per-CCD temperatures
+ssd = true                    # SSD panel
 
-[cores]
-# Códigos da paleta de 256 cores do terminal (0 a 255).
-normal = 42                   # verde
-morno = 184                   # amarelo
-quente = 208                  # laranja
-critico = 196                 # vermelho
-borda_cpu = 75                # azul
-borda_gpu = 114               # verde-claro
-borda_ssd = 180               # bege
-titulo = 81                   # ciano
+[colors]
+# Terminal 256-color palette codes (0 to 255).
+normal = 42                   # green
+warm = 184                    # yellow
+hot = 208                     # orange
+critical = 196                # red
+cpu_border = 75               # blue
+gpu_border = 114              # light green
+ssd_border = 180              # beige
+title = 81                    # cyan
 """
 DEFAULTS = {
-    "intervalo": 1.0,
-    "limites": {"cpu_alerta": 70, "cpu_critico": 85, "gpu_alerta": 75, "gpu_critico": 85,
-                "ssd_alerta": 60, "ssd_critico": 70, "cpu_amd_limite": 89},
-    "log": {"pasta": "~/tempmon-logs"},
-    "exibir": {"nucleos": True, "ssd": True},
-    "cores": {"normal": 42, "morno": 184, "quente": 208, "critico": 196,
-              "borda_cpu": 75, "borda_gpu": 114, "borda_ssd": 180, "titulo": 81},
+    "interval": 1.0,
+    "thresholds": {"cpu_warn": 70, "cpu_critical": 85, "gpu_warn": 75, "gpu_critical": 85,
+                   "ssd_warn": 60, "ssd_critical": 70, "cpu_amd_limit": 89},
+    "log": {"dir": "~/tempmon-logs"},
+    "show": {"cores": True, "ssd": True},
+    "colors": {"normal": 42, "warm": 184, "hot": 208, "critical": 196,
+               "cpu_border": 75, "gpu_border": 114, "ssd_border": 180, "title": 81},
 }
 
 
@@ -85,21 +86,21 @@ def same_type(default, value):
 
 
 def merge(base, user, prefix=""):
-    """Aplica a configuração do usuário sobre os padrões, ignorando valores inválidos."""
+    """Apply the user's config over the defaults, skipping invalid values."""
     problems = []
     for k, v in user.items():
         name = prefix + k
         if k not in base:
-            problems.append(f"'{name}' desconhecido")
+            problems.append(f"unknown key '{name}'")
         elif isinstance(base[k], dict):
             if isinstance(v, dict):
                 problems += merge(base[k], v, name + ".")
             else:
-                problems.append(f"'{name}' deveria ser uma seção")
+                problems.append(f"'{name}' should be a section")
         elif not same_type(base[k], v):
-            problems.append(f"'{name}' com tipo inválido")
-        elif prefix == "cores." and not 0 <= v <= 255:
-            problems.append(f"'{name}' fora de 0-255")
+            problems.append(f"'{name}' has an invalid type")
+        elif prefix == "colors." and not 0 <= v <= 255:
+            problems.append(f"'{name}' out of 0-255")
         else:
             base[k] = v
     return problems
@@ -112,17 +113,17 @@ def load_config():
             f.write(DEFAULT_CONFIG)
     cfg = copy.deepcopy(DEFAULTS)
     if tomllib is None:
-        return cfg, "config ignorado: instale python3-tomli (Python < 3.11)"
+        return cfg, "config ignored: install python3-tomli (Python < 3.11)"
     try:
         with open(CONFIG_PATH, "rb") as f:
             user = tomllib.load(f)
     except Exception as e:
-        return cfg, f"erro no config, usando padrão: {e}"
+        return cfg, f"config error, using defaults: {e}"
     problems = merge(cfg, user)
-    return cfg, ("config: " + "; ".join(problems) + " (ignorado)") if problems else None
+    return cfg, ("config: " + "; ".join(problems) + " (ignored)") if problems else None
 
 
-# ───────────────────────── cores e desenho ─────────────────────────
+# ───────────────────────── colors and drawing ─────────────────────────
 R, B, DIM = "\033[0m", "\033[1m", "\033[2m"
 ANSI = re.compile(r"\033\[[0-9;?]*[a-zA-Z]")
 
@@ -132,13 +133,13 @@ def fg(n):
 
 
 GRAY, DARK = fg(244), fg(237)
-C = {}      # cores do tema, preenchidas por setup()
-LIM = {}    # limites de temperatura
+C = {}      # theme colors, filled by setup()
+LIM = {}    # temperature thresholds
 
 
 def setup(cfg):
-    C.update({k: fg(v) for k, v in cfg["cores"].items()})
-    LIM.update(cfg["limites"])
+    C.update({k: fg(v) for k, v in cfg["colors"].items()})
+    LIM.update(cfg["thresholds"])
 
 
 def clamp(x, lo=0.0, hi=1.0):
@@ -148,13 +149,13 @@ def clamp(x, lo=0.0, hi=1.0):
 def temp_color(t, kind="cpu"):
     if t is None:
         return GRAY
-    warn, hot = LIM[f"{kind}_alerta"], LIM[f"{kind}_critico"]
-    if t >= hot:
-        return C["critico"]
+    warn, crit = LIM[f"{kind}_warn"], LIM[f"{kind}_critical"]
+    if t >= crit:
+        return C["critical"]
     if t >= warn:
-        return C["quente"]
+        return C["hot"]
     if t >= warn - 15:
-        return C["morno"]
+        return C["warm"]
     return C["normal"]
 
 
@@ -163,7 +164,7 @@ def tcolor(kind):
 
 
 def load_color(p):
-    return C["critico"] if p >= 90 else C["quente"] if p >= 70 else C["morno"] if p >= 40 else C["normal"]
+    return C["critical"] if p >= 90 else C["hot"] if p >= 70 else C["warm"] if p >= 40 else C["normal"]
 
 
 EIGHTHS = " ▏▎▍▌▋▊▉"
@@ -171,7 +172,7 @@ SPARK = "▁▂▃▄▅▆▇█"
 
 
 def bar(value, maximum, width, colorfn):
-    """Barra com gradiente: cada célula tem a cor do valor que ela representa."""
+    """Gradient bar: each cell gets the color of the value it represents."""
     if width <= 0:
         return ""
     cells = clamp((value or 0) / maximum if maximum else 0) * width
@@ -199,7 +200,7 @@ def vlen(s):
 
 
 def pad(s, w):
-    if vlen(s) > w:  # corta sem quebrar códigos de cor
+    if vlen(s) > w:  # truncate without breaking color codes
         out, vis = [], 0
         for tok in re.split(r"(\033\[[0-9;?]*[a-zA-Z])", s):
             if tok.startswith("\033"):
@@ -218,7 +219,7 @@ def panel(title, lines, w, color):
     return [top] + body + [f"{color}╰" + "─" * (w - 2) + f"╯{R}"]
 
 
-# ───────────────────────── estatísticas e throttling ─────────────────────────
+# ───────────────────────── statistics and throttling ─────────────────────────
 class Stat:
     def __init__(self):
         self.n, self.total, self.peak = 0, 0.0, None
@@ -238,7 +239,7 @@ class Stat:
 
 
 class Throttle:
-    """Guarda se há throttling agora e quantas vezes/quanto tempo aconteceu na sessão."""
+    """Tracks whether throttling is happening now and how often / how long it happened this session."""
 
     def __init__(self):
         self.active, self.events, self.secs, self.available = False, 0, 0.0, True
@@ -255,20 +256,20 @@ class Throttle:
 
     def line(self):
         if not self.available:
-            return f"{GRAY}throttling: informação não disponível{R}"
+            return f"{GRAY}throttling: not available{R}"
         if self.active:
-            return f"{C['critico']}{B}▲ THROTTLING: clock reduzido por temperatura{R}"
+            return f"{C['critical']}{B}▲ THROTTLING: clock reduced due to heat{R}"
         if self.events:
-            return f"{C['quente']}▲ houve throttling {self.events}x nesta sessão ({self.secs:.0f}s){R}"
-        return f"{GRAY}✓ sem throttling térmico{R}"
+            return f"{C['hot']}▲ throttled {self.events}x this session ({self.secs:.0f}s){R}"
+        return f"{GRAY}✓ no thermal throttling{R}"
 
     def summary(self):
         if not self.available:
-            return "não disponível"
-        return f"{self.events}x ({self.secs:.0f}s)" if self.events else "nenhum"
+            return "not available"
+        return f"{self.events}x ({self.secs:.0f}s)" if self.events else "none"
 
 
-# ───────────────────────── leitura de sensores ─────────────────────────
+# ───────────────────────── sensor reading ─────────────────────────
 def readf(p):
     try:
         with open(p) as f:
@@ -309,7 +310,7 @@ def read_cpu_temps(hw):
 
 
 def split_cpu_temps(temps):
-    """Separa a temperatura principal (Pacote / Tctl) das demais (núcleos / CCDs)."""
+    """Split the main temperature (Package / Tctl) from the others (cores / CCDs)."""
     main = None
     for i, (n, _) in enumerate(temps):
         if n.startswith("Package") or n in ("Tctl", "Tdie"):
@@ -317,7 +318,7 @@ def split_cpu_temps(temps):
             break
     if main is None and temps:
         main = max(t for _, t in temps)
-    return main, [(re.sub(r"^Core (\d+)", r"Núc \1", n), t) for n, t in temps]
+    return main, temps
 
 
 def read_cpu_stat():
@@ -341,7 +342,7 @@ def read_mem():
 
 
 class IntelThrottle:
-    """Contadores de throttling térmico do kernel (CPUs Intel)."""
+    """Kernel thermal throttling counters (Intel CPUs)."""
 
     def __init__(self):
         base = "/sys/devices/system/cpu/cpu[0-9]*/thermal_throttle/"
@@ -365,7 +366,7 @@ NV_BASE = "name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.d
 
 
 def nvidia_query():
-    """Descobre quais campos de throttling o driver aceita (o nome mudou nas versões novas)."""
+    """Find which throttling fields the driver accepts (the name changed in newer drivers)."""
     for prefix in ("clocks_event_reasons", "clocks_throttle_reasons"):
         q = f"{NV_BASE},{prefix}.hw_thermal_slowdown,{prefix}.sw_thermal_slowdown"
         r = subprocess.run(["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"],
@@ -397,7 +398,7 @@ def read_nvidia(query):
 
 
 def find_amdgpu():
-    """Escolhe a Radeon com mais VRAM (ignora a GPU integrada se houver placa dedicada)."""
+    """Pick the Radeon with the most VRAM (skips the integrated GPU when there is a discrete card)."""
     best = None
     for d in hwmons("amdgpu"):
         dev = os.path.realpath(f"{d}/device")
@@ -449,11 +450,11 @@ def find_ssds():
 
 def fmt(v, unit="", nd=0):
     if v is None:
-        return f"{GRAY}N/D{R}"
-    return f"{v:,.{nd}f}".replace(",", ".") + unit
+        return f"{GRAY}N/A{R}"
+    return f"{v:,.{nd}f}" + unit
 
 
-# ───────────────────────── montagem da tela ─────────────────────────
+# ───────────────────────── screen layout ─────────────────────────
 LBL, VAL, EXTRA = 8, 8, 9
 
 
@@ -468,14 +469,14 @@ def bar_width(inner, ew=EXTRA):
 def temp_rows(stat, bw, kind):
     t = stat.hist[-1]
     return [row("Temp", bar(t, 100, bw, tcolor(kind)), f"{temp_color(t, kind)}{B}{t:.1f}°C{R}",
-                f"{GRAY} máx {stat.peak:.0f}°{R}"),
-            row("", sparkline(stat.hist, bw, tcolor(kind)), "", f"{GRAY} méd {stat.avg:.0f}°{R}")]
+                f"{GRAY} max {stat.peak:.0f}°{R}"),
+            row("", sparkline(stat.hist, bw, tcolor(kind)), "", f"{GRAY} avg {stat.avg:.0f}°{R}")]
 
 
 def grid(items, inner):
     lines, colw = [], (inner - 2) // 2
-    mb = max(4, colw - 12)
-    cells = [f"{GRAY}{n:<6}{R}{bar(t, 100, mb, tcolor('cpu'))} {temp_color(t)}{t:3.0f}°{R}" for n, t in items]
+    mb = max(4, colw - 13)
+    cells = [f"{GRAY}{n:<7}{R}{bar(t, 100, mb, tcolor('cpu'))} {temp_color(t)}{t:3.0f}°{R}" for n, t in items]
     for i in range(0, len(cells), 2):
         pair = cells[i:i + 2]
         lines.append(pad(pair[0], colw) + ("  " + pair[1] if len(pair) > 1 else ""))
@@ -489,12 +490,12 @@ def cpu_panel(w, st, cfg):
     if st["cpu_temp"] is not None:
         L += temp_rows(st["cpu_stat"], bw, "cpu")
     else:
-        L.append(f"{C['quente']}Sensor de temperatura não encontrado{R}")
-    L.append(row("Uso", bar(st["cpu_load"], 100, bw, load_color), f"{st['cpu_load']:.0f}%"))
+        L.append(f"{C['hot']}Temperature sensor not found{R}")
+    L.append(row("Load", bar(st["cpu_load"], 100, bw, load_color), f"{st['cpu_load']:.0f}%"))
     mu, mt = st["mem"]
-    L.append(row("RAM", bar(100 * mu / mt, 100, bw, load_color), f"{mu:.1f} GB", f"{GRAY} de {mt:.0f} GB{R}"))
+    L.append(row("RAM", bar(100 * mu / mt, 100, bw, load_color), f"{mu:.1f} GB", f"{GRAY} of {mt:.0f} GB{R}"))
     L.append(f"{GRAY}{'Clock':<{LBL}}{R}{fmt(st['cpu_freq'], ' MHz')}")
-    if st["cpu_cores"] and cfg["exibir"]["nucleos"]:
+    if st["cpu_cores"] and cfg["show"]["cores"]:
         L += [""] + grid(st["cpu_cores"], inner)
     return L
 
@@ -504,18 +505,18 @@ def gpu_panel(w, st):
     bw = bar_width(inner)
     g = st["gpu"]
     if not g:
-        return [f"{C['quente']}Nenhuma GPU NVIDIA ou AMD detectada{R}"]
+        return [f"{C['hot']}No NVIDIA or AMD GPU detected{R}"]
     L = [f"{DIM}{g['name']}{R}", st["gpu_thr"].line(), ""]
     if g["temp"] is not None:
         L += temp_rows(st["gpu_stat"], bw, "gpu")
     u = g["util"] or 0
-    L.append(row("Uso", bar(u, 100, bw, load_color), f"{u:.0f}%"))
+    L.append(row("Load", bar(u, 100, bw, load_color), f"{u:.0f}%"))
     if g["mem_used"] is not None and g["mem_total"]:
         L.append(row("VRAM", bar(100 * g["mem_used"] / g["mem_total"], 100, bw, load_color),
-                     f"{g['mem_used'] / 1024:.1f} GB", f"{GRAY} de {g['mem_total'] / 1024:.0f} GB{R}"))
-    L.append(f"{GRAY}{'Clock':<{LBL}}{R}{pad(fmt(g['clock'], ' MHz'), 14)}  {GRAY}Ventoinha{R} {fmt(g['fan'], '%')}")
+                     f"{g['mem_used'] / 1024:.1f} GB", f"{GRAY} of {g['mem_total'] / 1024:.0f} GB{R}"))
+    L.append(f"{GRAY}{'Clock':<{LBL}}{R}{pad(fmt(g['clock'], ' MHz'), 14)}  {GRAY}Fan{R} {fmt(g['fan'], '%')}")
     pw = fmt(g["power"], " W", 1) + (f"{GRAY} / {g['plimit']:.0f} W{R}" if g["plimit"] else "")
-    L.append(f"{GRAY}{'Consumo':<{LBL}}{R}{pw}")
+    L.append(f"{GRAY}{'Power':<{LBL}}{R}{pw}")
     return L
 
 
@@ -526,15 +527,15 @@ def ssd_panel(w, ssds):
     L = []
     for s in ssds:
         t, stat = s["temp"], s["stat"]
-        lim = f"{GRAY}  ·  limite do fabricante {s['limit']:.0f}°C{R}" if s["limit"] else ""
+        lim = f"{GRAY}  ·  manufacturer limit {s['limit']:.0f}°C{R}" if s["limit"] else ""
         L.append(f"{DIM}{s['name']}{R}{lim}")
         if t is None:
-            L.append(f"{GRAY}temperatura indisponível{R}")
+            L.append(f"{GRAY}temperature unavailable{R}")
             continue
         L.append(row("Temp", bar(t, 100, bw, tcolor("ssd")), f"{temp_color(t, 'ssd')}{B}{t:.1f}°C{R}",
-                     f"{GRAY} máx {stat.peak:.0f}°  méd {stat.avg:.0f}°{R}", ew))
+                     f"{GRAY} max {stat.peak:.0f}°  avg {stat.avg:.0f}°{R}", ew))
         if s["limit"] and t >= s["limit"]:
-            L.append(f"{C['critico']}{B}▲ acima do limite: o SSD pode estar reduzindo a velocidade{R}")
+            L.append(f"{C['critical']}{B}▲ above limit: the SSD may be slowing down{R}")
     return L
 
 
@@ -546,37 +547,37 @@ def short_path(p):
 def render(st, cfg, start, interval, log_path, warn):
     cols, rows_ = shutil.get_terminal_size((100, 30))
     up = int(time.time() - start)
-    head = (f" {B}{C['titulo']}tempmon{R}  {GRAY}│{R}  {time.strftime('%H:%M:%S')}  {GRAY}│  sessão "
+    head = (f" {B}{C['title']}tempmon{R}  {GRAY}│{R}  {time.strftime('%H:%M:%S')}  {GRAY}│  session "
             f"{up // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d}{R}")
     if warn:
-        head += f"  {C['quente']}{warn}{R}"
-    foot = f" {GRAY}q sair  ·  atualiza a cada {interval:g}s{R}"
+        head += f"  {C['hot']}{warn}{R}"
+    foot = f" {GRAY}q quit  ·  refresh every {interval:g}s{R}"
     if log_path:
-        foot += f"  {GRAY}·{R}  {C['critico']}●{R} gravando {GRAY}{short_path(log_path)}{R}"
+        foot += f"  {GRAY}·{R}  {C['critical']}●{R} logging to {GRAY}{short_path(log_path)}{R}"
 
-    show_ssd = cfg["exibir"]["ssd"] and st["ssds"]
-    if cols >= 2 * 52 + 1:                       # lado a lado
+    show_ssd = cfg["show"]["ssd"] and st["ssds"]
+    if cols >= 2 * 52 + 1:                       # side by side
         w = min(72, (cols - 1) // 2)
-        a = panel("CPU", cpu_panel(w, st, cfg), w, C["borda_cpu"])
-        b = panel("GPU", gpu_panel(w, st), w, C["borda_gpu"])
+        a = panel("CPU", cpu_panel(w, st, cfg), w, C["cpu_border"])
+        b = panel("GPU", gpu_panel(w, st), w, C["gpu_border"])
         h = max(len(a), len(b))
-        for p, color in ((a, C["borda_cpu"]), (b, C["borda_gpu"])):   # iguala as alturas
+        for p, color in ((a, C["cpu_border"]), (b, C["gpu_border"])):   # equal heights
             while len(p) < h:
                 p.insert(-1, f"{color}│{R}" + " " * (w - 2) + f"{color}│{R}")
         body = [x + " " + y for x, y in zip(a, b)]
         if show_ssd:
-            body += panel("SSD", ssd_panel(2 * w + 1, st["ssds"]), 2 * w + 1, C["borda_ssd"])
-    else:                                        # empilhado
+            body += panel("SSD", ssd_panel(2 * w + 1, st["ssds"]), 2 * w + 1, C["ssd_border"])
+    else:                                        # stacked
         w = max(44, min(cols, 72))
-        body = panel("CPU", cpu_panel(w, st, cfg), w, C["borda_cpu"]) + panel("GPU", gpu_panel(w, st), w, C["borda_gpu"])
+        body = panel("CPU", cpu_panel(w, st, cfg), w, C["cpu_border"]) + panel("GPU", gpu_panel(w, st), w, C["gpu_border"])
         if show_ssd:
-            body += panel("SSD", ssd_panel(w, st["ssds"]), w, C["borda_ssd"])
+            body += panel("SSD", ssd_panel(w, st["ssds"]), w, C["ssd_border"])
 
     lines = [pad(head, cols), ""] + body + ["", pad(foot, cols)]
     return "\033[H" + "\n".join(l + "\033[K" for l in lines[:rows_]) + "\033[J"
 
 
-# ───────────────────────── log CSV ─────────────────────────
+# ───────────────────────── CSV log ─────────────────────────
 def slug(s):
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
 
@@ -587,9 +588,9 @@ class CsvLog:
         self.path = path
         self.f = open(path, "w", newline="")
         self.w = csv.writer(self.f)
-        self.w.writerow(["hora", "cpu_temp_c", "cpu_uso_pct", "cpu_clock_mhz", "ram_usada_gb", "cpu_throttling",
-                         "gpu_temp_c", "gpu_uso_pct", "gpu_vram_gb", "gpu_clock_mhz", "gpu_ventoinha_pct",
-                         "gpu_consumo_w", "gpu_throttling"] + [f"ssd_{slug(s['name'])}_temp_c" for s in ssds])
+        self.w.writerow(["time", "cpu_temp_c", "cpu_load_pct", "cpu_clock_mhz", "ram_used_gb", "cpu_throttling",
+                         "gpu_temp_c", "gpu_load_pct", "gpu_vram_gb", "gpu_clock_mhz", "gpu_fan_pct",
+                         "gpu_power_w", "gpu_throttling"] + [f"ssd_{slug(s['name'])}_temp_c" for s in ssds])
 
     def write(self, st):
         def f(v, nd=1):
@@ -609,17 +610,17 @@ class CsvLog:
         self.f.close()
 
 
-# ───────────────────────── laço principal ─────────────────────────
+# ───────────────────────── main loop ─────────────────────────
 def parse_args():
-    ap = argparse.ArgumentParser(prog="tempmon", description="Monitor de temperatura de CPU, GPU e SSD.")
-    ap.add_argument("intervalo", nargs="?", type=float, help="segundos entre atualizações")
-    ap.add_argument("--log", action="store_true", help="grava a sessão em CSV na pasta da configuração")
-    ap.add_argument("-o", "--saida", metavar="ARQUIVO", help="grava a sessão em CSV neste arquivo")
-    ap.add_argument("--config", action="store_true", help="mostra o caminho do arquivo de configuração")
+    ap = argparse.ArgumentParser(prog="tempmon", description="CPU, GPU and SSD temperature monitor for the terminal.")
+    ap.add_argument("interval", nargs="?", type=float, help="seconds between refreshes")
+    ap.add_argument("--log", action="store_true", help="log the session to CSV in the configured folder")
+    ap.add_argument("-o", "--output", metavar="FILE", help="log the session to CSV in this file")
+    ap.add_argument("--config", action="store_true", help="print the config file path")
     ap.add_argument("--version", action="version", version=f"tempmon {VERSION}")
     args = ap.parse_args()
-    if args.intervalo is not None and args.intervalo < 0.2:
-        ap.error("o intervalo mínimo é 0.2 segundo")
+    if args.interval is not None and args.interval < 0.2:
+        ap.error("the minimum interval is 0.2 seconds")
     return args
 
 
@@ -630,7 +631,7 @@ def main():
         print(CONFIG_PATH)
         return
     setup(cfg)
-    interval = args.intervalo or max(0.2, float(cfg["intervalo"]))
+    interval = args.interval or max(0.2, float(cfg["interval"]))
 
     cpu_hw = next(iter(hwmons("coretemp") + hwmons("k10temp") + hwmons("zenpower")), None)
     is_amd_cpu = bool(cpu_hw) and readf(f"{cpu_hw}/name") != "coretemp"
@@ -642,13 +643,13 @@ def main():
         intel_thr = None
 
     log = None
-    if args.log or args.saida:
-        path = args.saida or os.path.join(os.path.expanduser(cfg["log"]["pasta"]),
-                                          datetime.now().strftime("tempmon_%Y-%m-%d_%H-%M-%S.csv"))
+    if args.log or args.output:
+        path = args.output or os.path.join(os.path.expanduser(cfg["log"]["dir"]),
+                                           datetime.now().strftime("tempmon_%Y-%m-%d_%H-%M-%S.csv"))
         try:
             log = CsvLog(os.path.abspath(os.path.expanduser(path)), st["ssds"])
         except OSError as e:
-            sys.exit(f"tempmon: não foi possível criar o log em {path}: {e.strerror}")
+            sys.exit(f"tempmon: could not create log file {path}: {e.strerror}")
 
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     old = None
@@ -658,7 +659,7 @@ def main():
         tty.setcbreak(fd)
 
     def wait(t):
-        """Espera t segundos; devolve True se o usuário apertou q."""
+        """Wait t seconds; return True if the user pressed q."""
         if fd is None:
             time.sleep(t)
             return False
@@ -689,7 +690,7 @@ def main():
             if intel_thr:
                 st["cpu_thr"].update(*intel_thr.poll(dt_s))
             elif is_amd_cpu and st["cpu_temp"] is not None:
-                st["cpu_thr"].update(st["cpu_temp"] >= LIM["cpu_amd_limite"], dt_s)
+                st["cpu_thr"].update(st["cpu_temp"] >= LIM["cpu_amd_limit"], dt_s)
             else:
                 st["cpu_thr"].update(None, 0)
 
@@ -715,11 +716,11 @@ def main():
         sys.stdout.write("\033[?25h\033[?1049l")
         sys.stdout.flush()
         up = int(time.time() - start)
-        print(f"Resumo da sessão ({up // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d})")
+        print(f"Session summary ({up // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d})")
 
         def line(name, stat, thr=None):
             if stat.n:
-                s = f"  {name:<22} máx {stat.peak:5.1f}°C   méd {stat.avg:5.1f}°C"
+                s = f"  {name:<22} max {stat.peak:5.1f}°C   avg {stat.avg:5.1f}°C"
                 print(s + (f"   throttling: {thr.summary()}" if thr else ""))
         line("CPU", st["cpu_stat"], st["cpu_thr"])
         line("GPU", st["gpu_stat"], st["gpu_thr"])
@@ -727,7 +728,7 @@ def main():
             line("SSD " + s["name"][:18], s["stat"])
         if log:
             log.close()
-            print(f"Log salvo em: {log.path}")
+            print(f"Log saved to: {log.path}")
 
 
 if __name__ == "__main__":
